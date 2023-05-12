@@ -1,0 +1,180 @@
+import std.*;
+import cdk.*;
+
+public void kinetics(int reaction_limit, 
+                     chan<string>.read input_mol,
+                     chan<float>.write[] output_therm_rate) {
+    int counter = 0;
+    string mol = "";
+    float rate = 0.;
+    int id = 0;
+    while (counter < reaction_limit){
+      string_mol = input_mol.read();
+      id = (int)string_mol[0];
+      // perform calculations needed for kinetics model and  store in rate.
+      output_therm_rate[id].write(rate);
+      counter += 1;
+    }
+  }
+
+public void thermal(int reaction_limit, 
+                    chan<string>.read input_mol,
+                    chan<float>.write[] output_therm_str) {
+    int counter = 0;
+    string mol = "";
+    float therm = 0.;
+    int requester = 0;
+    while (counter < reaction_limit){
+      string_mol = input_mol.read();
+      id = (int)string_mol[0];
+      // perform calculations needed for kinetics model and store in therm.
+      output_therm_str[id].write(therm);
+      counter += 1;
+    }
+  }
+
+public int generate(int id,
+                    string base_mol, string reactant,
+                    chan<string>.write kinetic, 
+                    chan<string>.write thermal,
+                    chan<int>.read kin_therm_share) {
+    int kin = 0;
+    int therm = 0;
+    SmilesParser SMILER = new SmilesParser();
+    // For the sub-species matching, we're going to need to convert both molecules to their internal atom representation
+    IAtomContainer base     = SMILER.parseSmiles(base_mol); 
+    IAtomContainer reactor  = SMILER.parseSmiles(reactant); 
+    QueryAtom q_base        = new QueryAtom(Expr.Type.TRUE, base);
+    QueryAtom q_reactor     = new QueryAtom(Expr.Type.TRUE, reactor);
+    
+    if(q_base.matches(reactor) && q_reactor.matches(base)){ // Gives a bi-directional match for extra insurance
+      // Edit base_mol to include id and multiplicity
+      kinetic.write(id + base_mol);
+      kin = kin_therm_share.read();
+      thermal.write(id + base_mol);
+      therm = kin_therm_share.read();
+      return //combination of kin and therm
+    } else { // Else attempt to modify reactant
+      if(base.getBondCount() < base.getAtomCount() - 1){ // Check to see if there is a free bond available
+        reactor.add(base) // attempt to attach the base compound to the reactor
+        if (reactor.getLonePairCount() > 0) {
+          kinetic.write(id + reactor);
+          kin = kin_therm_share.read();
+          thermal.write(id + reactor);
+          therm = kin_therm_share.read();
+          return //combination of kin and therm  
+        } else {
+          // I haven't decided if adding a simple Hydrogen to the bond is a good idea here or not.
+          // Consider the following:
+          //    A hydrogen is bonded to the only free bond left.
+          //    This effectively halts any further generation of the molecule.
+          //    If left open, that hydrogen bond could have been the bond that 
+          //    connected it to another complex molecule and enabled a catalyst reaction.
+          //    This is something I need to discuss with Dr.Kang.
+
+          // Even though, the kin and therm processes don't do anything for now. They still need to communicate to ensure synchronization a the callers par block. Perhaps my "countdown system" should be revised.
+          kin = kin_therm_share.read();
+          kinetic.write(id + base_mol);
+          therm = kin_therm_share.read();
+          thermal.write(id + base_mol);
+        }
+      } else {
+        // Even though, the kin and therm processes don't do anything for now. They still need to communicate to ensure synchronization a the callers par block. Perhaps my "countdown system" should be revised.
+        kin = kin_therm_share.read();
+        kinetic.write(id + base_mol);
+        therm = kin_therm_share.read();
+        thermal.write(id + base_mol);
+      }
+      return -1;
+    }
+  }
+
+public string test_molecule(string input_molecule) {
+    const int R = 16;
+    // The original COMGEN allowed for user input files. This is something we DESPERATELY need in PJ...
+    string[] reactions = {"[3H]C",
+                          "[2H]C",
+                          "[2H]CO",
+                          "[2H]COO",
+                          "[2H]COO[1H]",
+                          "[2H]CC[2H]",
+                          "[2H]CC[3H]",
+                          "[2H]COC",
+                          "[1H]CC[3H]",
+                          "[1H]CC[3H]",
+                          "[1H]COO[1H]",
+                          "[1H]CC[O1H]",
+                          "CC[HOH]",
+                          "[2H]CXC[2H]",
+                          "[2H]CXXC[2H]",
+                          "[1H]C=C[1H]"
+                          };
+    float[R] combust_val = {0,0, ..., 0};
+    chan<string> kinetic_chan;
+    chan<string> thermal_chan;
+    chan[R]<float> kin_therm_share;
+    par{
+      kinetics(R, kinetic_chan.read, kin_therm_share.write);
+      thermal(R, thermal_chan.read, kin_therm_share.write);
+      par for (int i = 0; i < R; i++){
+        combust_val[i] = generate(i, 
+                                  input_molecule, reactions[i],
+                                  kinetic_chan.write,
+                                  thermal_chan.write,
+                                  kin_therm_share[i].read);
+      }
+    }
+    float max = 0;
+    for (int i = 1; i < R; i++)
+      if (combust_val[i] > combust_val[max])
+        max = i; 
+
+    SmilesParser SMILER = new SmilesParser();
+    SmilesGenerator GEN = new SmilesGenerator(SmiFlavor.Isometric);
+    IAtomContainer base     = SMILER.parseSmiles(input_molecule); 
+    IAtomContainer reactor  = SMILER.parseSmiles(reactions[max]);
+    reactor.add(base);
+    return (string)GEN.create(reactor);
+    // return the reaction that corresponded with the max index
+}
+
+public void main(string args[]) {
+  // First Generate a list of hydrocarbons for analysis
+  // This list will serve as the individual base molecules to be analyzed
+  const int M = 20;
+  string[] molecules = new string[M];
+  string[] products = new string[M];
+
+  // Hardcoded carbon bonded tests
+  molecules[0] = "C1CCC2CCCCC2C1"
+  molecules[1] = "C1CC2CCC1C2"
+  molecules[2] = "C1CCC2(CC1)CCCCC2"
+  molecules[3] = "COONO2"
+  molecules[4] = "C1CCC1"
+  molecules[5] = "C12C3C1C23"
+  molecules[6] = "CC"
+  molecules[7] = "CCO" 
+  molecules[8] = "C1CC2CCCCC2CC1" // special case napthaline
+
+  // I found that the Isometric option solved many issues associated with BFS traversal in generate
+  // Original, 
+  //    You had to account for electron bonding happen on any outer orbital. 
+  //    This lead to backtracking inefficiencies during the BFS tree traversal.
+  //    With the SDK isometric generator, all generated molecules and iosmers are oriented with stereochemistry 
+  SmilesGenerator GEN = new SmilesGenerator(SmiFlavor.Isometric); // Object methods capable of taking a list of atoms and creating a number of molecules
+  IAtomContainer hydrocarb = MoleculeFactory.makeHydroCarb(); // Declare container to hold generator patterns needed for generating hydro-carbons
+  for(int i = 9; i < M; i++){
+    molecules[9] = GEN.create(hydrocarb); // For now, this can create duplicate molecules. It's going to be addressed once the input system is fixed and capable of taking input from a file with a list of SMIILE stings
+  }
+
+  par for (int i = 0; i < M; i++){
+    products[i] = test_molecule(molecules[i]);
+  }
+
+  // While this was fun to play with... I don't think it is useful other than to show expandability  
+  // while(true){
+  //   par for (int i = 0; i < M; i++){
+  //     products[i] = test_molecule(products[i]);
+  //   } 
+  // }
+}
